@@ -1,0 +1,28 @@
+# Sensitive biometric captures (real biometric folder)
+sample_data/real_biometric/
+*.raw
+*.dat.secret
+*.fingerprint
+*.iris
+
+# Build artifacts
+*.o
+build/
+bin/
+sender
+receiver
+proxy
+test_runner
+capture
+
+# Test / run artifacts
+received_files/
+logs/*.log
+logs/*.csv
+logs/*.pcap
+results/*.csv
+results/*.png
+
+# Editor / OS files
+.DS_Store
+*.swp
