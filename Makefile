@@ -1,7 +1,15 @@
 CC ?= gcc
-CFLAGS ?= -std=c11 -Wall -Wextra -Wpedantic -Werror -O2 -Isrc
+ifeq ($(wildcard C:/mingw64/bin/gcc.exe),C:/mingw64/bin/gcc.exe)
+  CC = C:/mingw64/bin/gcc.exe
+endif
+
+CFLAGS ?= -std=c11 -Wall -Wextra -Wpedantic -Werror -Wno-unused-but-set-variable -O2 -Isrc
 LDFLAGS ?= 
 PCAP_LIBS ?= -lpcap
+
+ifeq ($(OS),Windows_NT)
+  LDFLAGS += -lws2_32
+endif
 
 SRC_DIR = src
 TEST_DIR = tests
@@ -11,9 +19,15 @@ BIN_DIR = bin
 COMMON_SRCS = $(SRC_DIR)/crc32.c $(SRC_DIR)/sha256.c $(SRC_DIR)/net_util.c $(SRC_DIR)/protocol.c $(SRC_DIR)/log.c
 COMMON_OBJS = $(patsubst $(SRC_DIR)/%.c, $(BUILD_DIR)/%.o, $(COMMON_SRCS))
 
-TARGETS = $(BIN_DIR)/sender $(BIN_DIR)/receiver $(BIN_DIR)/proxy $(BIN_DIR)/capture $(BIN_DIR)/test_runner
+HAVE_PCAP := $(shell printf '\#include <pcap.h>\nint main(){return 0;}\n' | $(CC) -x c - -o /dev/null $(PCAP_LIBS) >/dev/null 2>&1 && echo yes || echo no)
 
-.PHONY: all debug test bench clean
+ifeq ($(HAVE_PCAP),yes)
+TARGETS = $(BIN_DIR)/sender $(BIN_DIR)/receiver $(BIN_DIR)/proxy $(BIN_DIR)/capture $(BIN_DIR)/test_runner
+else
+TARGETS = $(BIN_DIR)/sender $(BIN_DIR)/receiver $(BIN_DIR)/proxy $(BIN_DIR)/test_runner
+endif
+
+.PHONY: all debug test bench clean distclean
 
 all: $(TARGETS)
 

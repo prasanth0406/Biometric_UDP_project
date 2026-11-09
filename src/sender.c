@@ -39,7 +39,7 @@ static void print_progress(uint32_t current, uint32_t total, double goodput_kbps
 }
 
 int main(int argc, char *argv[]) {
-    char file_path[256] = "sample_data/biometric_template.dat";
+    char file_path[256] = "sample_data/real_biometric/20261102_091525.jpg";
     char host[64] = "127.0.0.1";
     int port = 5001;
     uint32_t chunk_size = 1024;

@@ -2,6 +2,10 @@
 # scripts/analyze_pcap.sh - Automated PCAP Wireshark Trace Analysis
 set -euo pipefail
 
+SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+ROOT_DIR="$(cd "${SCRIPT_DIR}/.." && pwd)"
+cd "${ROOT_DIR}"
+
 PCAP_FILE="${1:-}"
 
 if [ -z "${PCAP_FILE}" ] || [ ! -f "${PCAP_FILE}" ]; then
@@ -39,16 +43,63 @@ if command -v tshark &>/dev/null; then
     echo " Total Wire Bytes:     ${TOTAL_BYTES} bytes"
     echo " Wire Throughput:      ${THROUGHPUT_KBPS} KB/s (${THROUGHPUT_MBPS} Mbps)"
     echo "=========================================================="
+elif command -v python &>/dev/null; then
+    python - "${PCAP_FILE}" << 'PYEOF'
+import sys, struct
+
+pcap_file = sys.argv[1]
+with open(pcap_file, 'rb') as f:
+    ghdr = f.read(24)
+    if len(ghdr) < 24:
+        sys.exit(0)
+    magic = struct.unpack('!I', ghdr[:4])[0]
+    endian = '!' if magic == 0xa1b2c3d4 else '<'
+
+    pkts = 0
+    total_bytes = 0
+    syn_count = 0
+    fin_count = 0
+    first_ts = None
+    last_ts = None
+
+    while True:
+        phdr = f.read(16)
+        if len(phdr) < 16:
+            break
+        sec, usec, incl_len, orig_len = struct.unpack(f'{endian}IIII', phdr)
+        ts = sec + usec / 1000000.0
+        if first_ts is None:
+            first_ts = ts
+        last_ts = ts
+
+        data = f.read(incl_len)
+        pkts += 1
+        total_bytes += incl_len
+
+        # Parse Eth (14) + IP (20) + TCP (20)
+        if len(data) >= 54:
+            proto = data[23]
+            if proto == 6:  # TCP
+                tcp_flags = data[47]
+                if tcp_flags & 0x02:
+                    syn_count += 1
+                if tcp_flags & 0x01:
+                    fin_count += 1
+
+    dur = (last_ts - first_ts) if (first_ts and last_ts) else 0.0
+    tp_kbps = (total_bytes / 1024.0 / dur) if dur > 0 else 0.0
+    tp_mbps = (tp_kbps * 8) / 1000.0
+
+    print(f" Total Packets:        {pkts}")
+    print(f" TCP Frames:           {pkts}")
+    print(f" SYN (Handshakes):     {syn_count}")
+    print(f" FIN (Teardowns):      {fin_count}")
+    print(f" Duration:             {dur:.4f} s")
+    print(f" Total Wire Bytes:     {total_bytes} bytes")
+    print(f" Wire Throughput:      {tp_kbps:.2f} KB/s ({tp_mbps:.2f} Mbps)")
+    print("==========================================================")
+PYEOF
 else
-    # Fallback using capinfos if available or tcpdump
-    if command -v capinfos &>/dev/null; then
-        capinfos "${PCAP_FILE}"
-    elif command -v tcpdump &>/dev/null; then
-        echo "[INFO] Running basic packet summary with tcpdump..."
-        tcpdump -r "${PCAP_FILE}" -nn -q | head -n 30
-        echo "... [Run 'wireshark ${PCAP_FILE}' for full GUI analysis]"
-    else
-        echo "[INFO] Install tshark ('sudo apt-get install tshark') for automated metrics extraction."
-        echo "[INFO] You can open '${PCAP_FILE}' directly in Wireshark GUI."
-    fi
+    echo "[INFO] Install tshark or Python for automated metrics extraction."
+    echo "[INFO] You can open '${PCAP_FILE}' directly in Wireshark GUI."
 fi

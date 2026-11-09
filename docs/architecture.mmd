@@ -1,18 +1,18 @@
 flowchart TD
     subgraph SENDER_SIDE ["Sender (Client Application)"]
-        BF["Biometric File<br/>(sample_data/biometric_template.dat)"] --> SHA_S["SHA-256 Engine<br/>Full File Hash"]
+        BF["Real Biometric File<br/>(sample_data/real_biometric/*.jpg)"] --> SHA_S["SHA-256 Engine<br/>Full File Hash"]
         BF --> CHK["Chunking Engine<br/>512B / 1024B / 4096B / 8192B"]
         CHK --> CRC_S["CRC32 Engine<br/>Per-Chunk Checksum"]
         CRC_S --> FRM_S["BMTP Frame Serializer<br/>18-byte Packed Header"]
         SHA_S --> META["META Frame Generator<br/>(Filename, Size, Hash)"]
         META --> FRM_S
         FRM_S --> ARQ_S["ARQ Transmission Engine<br/>Stop-and-Wait / Sliding Window"]
-        ARQ_S --> SOCK_S["POSIX TCP Socket<br/>(TCP_NODELAY, Non-blocking/Poll)"]
+        ARQ_S --> SOCK_S["TCP Socket<br/>(TCP_NODELAY, Non-blocking/Poll)"]
     end
 
     subgraph NETWORK_CHANNEL ["Network Subsystem / Impairment Layer"]
-        SOCK_S -->|TCP Syn / Stream| PROXY["Lossy Network Impairment Proxy (proxy.c)<br/>- Random Packet Drop (0% - 10%)<br/>- Artificial Latency (0 - 100ms)<br/>- CRC Fault Injection (Bit-flip)"]
-        PROXY -->|Impaired TCP Stream| SOCK_R["POSIX TCP Socket<br/>(Server Bind & Listen 5001)"]
+        SOCK_S -->|TCP Stream| PROXY["Lossy Network Impairment Proxy (proxy.c)<br/>- Random Packet Drop (0% - 10%)<br/>- Artificial Latency (0 - 100ms)<br/>- CRC Fault Injection (Bit-flip)"]
+        PROXY -->|Impaired TCP Stream| SOCK_R["TCP Socket<br/>(Server Bind & Listen 5001)"]
     end
 
     subgraph RECEIVER_SIDE ["Receiver (Server Application)"]
@@ -22,7 +22,7 @@ flowchart TD
         CRC_R -->|CRC Corrupt| NACK["NACK Generator<br/>Request Immediate Retransmit"]
         BUF --> ACK["ACK Generator<br/>Cumulative / Selective ACK"]
         BUF --> RECON["File Reconstruction Engine"]
-        RECON --> DISK["Output Storage<br/>(received_files/biometric.dat)"]
+        RECON --> DISK["Output Storage<br/>(received_files/*.jpg)"]
         DISK --> SHA_R["SHA-256 Full File Hash Verifier"]
         SHA_R --> STATUS["Integrity Verdict<br/>PASS / FAIL Badge"]
     end

@@ -132,6 +132,11 @@ int main(int argc, char *argv[]) {
                 break;
             }
 
+            if ((fds[0].revents & (POLLHUP | POLLERR)) || (fds[1].revents & (POLLHUP | POLLERR))) {
+                active = 0;
+                break;
+            }
+
             /* Data from Sender -> Receiver */
             if (fds[0].revents & POLLIN) {
                 uint8_t hdr_bytes[BMTP_HEADER_LEN];

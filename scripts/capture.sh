@@ -2,6 +2,10 @@
 # scripts/capture.sh - Real TCP Packet Capture to Wireshark PCAP
 set -euo pipefail
 
+SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+ROOT_DIR="$(cd "${SCRIPT_DIR}/.." && pwd)"
+cd "${ROOT_DIR}"
+
 PORT="${1:-5001}"
 IFACE="${2:-lo}"
 TIMESTAMP=$(date +"%Y%m%d_%H%M%S")
@@ -28,6 +32,10 @@ elif command -v tshark &>/dev/null; then
 elif [ -x "./bin/capture" ]; then
     echo "[INFO] Using compiled libpcap binary ./bin/capture..."
     exec ./bin/capture -i "${IFACE}" -p "${PORT}" -o "${OUT_PCAP}"
+elif command -v python &>/dev/null; then
+    PROXY_PORT=$((PORT + 2))
+    echo "[INFO] Using Python PCAP proxy recorder (listen on :${PROXY_PORT} -> forward to :${PORT})..."
+    exec python scripts/pcap_recorder.py "${PROXY_PORT}" "${PORT}" "${OUT_PCAP}"
 else
     echo "[ERROR] Neither tcpdump, tshark, nor ./bin/capture is available."
     exit 1

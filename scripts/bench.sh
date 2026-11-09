@@ -2,12 +2,34 @@
 # scripts/bench.sh - Automated Performance Evaluation and Benchmark Runner
 set -euo pipefail
 
-SAMPLE_FILE="sample_data/biometric_template.dat"
+SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+ROOT_DIR="$(cd "${SCRIPT_DIR}/.." && pwd)"
+cd "${ROOT_DIR}"
+
+SAMPLE_FILE="${1:-}"
+if [ -z "${SAMPLE_FILE}" ]; then
+    for f in sample_data/real_biometric/*.*; do
+        if [ -f "$f" ]; then
+            SAMPLE_FILE="$f"
+            break
+        fi
+    done
+fi
+
+if [ -z "${SAMPLE_FILE}" ] || [ ! -f "${SAMPLE_FILE}" ]; then
+    echo "[ERROR] No real biometric file found in sample_data/real_biometric/"
+    exit 1
+fi
+
+BASE_NAME="$(basename "${SAMPLE_FILE}")"
+FILE_SIZE=$(wc -c < "${SAMPLE_FILE}" | tr -d ' ')
 RECV_DIR="received_files"
 RESULTS_DIR="results"
 CSV_FILE="${RESULTS_DIR}/results.csv"
 
 mkdir -p "${RECV_DIR}" "${RESULTS_DIR}" logs
+
+echo "[BENCH] Target Biometric File: ${BASE_NAME} (${FILE_SIZE} bytes)"
 
 # Header for results.csv
 echo "Experiment,Param_Name,Param_Value,Duration_Mean_s,Duration_Std_s,Goodput_Mean_KBps,Goodput_Std_KBps,Throughput_Mean_KBps,Throughput_Std_KBps,Retransmits_Mean,Retransmits_Std,LossRate_Mean_pct,LossRate_Std_pct,Overhead_Mean_pct,Overhead_Std_pct,Handshake_Mean_ms,Handshake_Std_ms,RTT_Mean_ms,RTT_Std_ms" > "${CSV_FILE}"
@@ -66,7 +88,12 @@ run_experiment() {
         sleep 0.1
 
         local p_pid=""
-        if (( $(echo "${loss_rate} > 0.0" | bc -l) )) || [ "${delay_ms}" -gt 0 ]; then
+        local is_loss=0
+        if [ "$(echo "${loss_rate} > 0.0" | bc -l 2>/dev/null || awk "BEGIN {print (${loss_rate} > 0.0)}")" = "1" ]; then
+            is_loss=1
+        fi
+
+        if [ "${is_loss}" -eq 1 ] || [ "${delay_ms}" -gt 0 ]; then
             local p_port=$((r_port + 1))
             ./bin/proxy -l "${p_port}" -p "${r_port}" -m "${loss_rate}" -t "${delay_ms}" -1 >/dev/null 2>&1 &
             p_pid=$!
@@ -76,9 +103,10 @@ run_experiment() {
 
         local timeout_arg=$((500 + delay_ms * 3))
         local out
-        out=$(./bin/sender -f "${SAMPLE_FILE}" -p "${s_target_port}" -c "${chunk_sz}" -w "${win_sz}" -t "${timeout_arg}" -q)
+        out=$(./bin/sender -f "${SAMPLE_FILE}" -p "${s_target_port}" -c "${chunk_sz}" -w "${win_sz}" -t "${timeout_arg}" -q 2>&1) || true
         wait "${r_pid}" 2>/dev/null || true
         if [ -n "${p_pid}" ]; then
+            kill "${p_pid}" 2>/dev/null || true
             wait "${p_pid}" 2>/dev/null || true
         fi
 
@@ -119,7 +147,7 @@ run_experiment() {
 }
 
 echo "=========================================================="
-echo " BMTP AUTOMATED BENCHMARK SUITE (5 Repetitions per config)"
+echo " BMTP AUTOMATED BENCHMARK SUITE (Repetitions per config)"
 echo "=========================================================="
 
 # 1. Experiment A: Chunk Size (512, 1024, 4096, 8192)
@@ -133,30 +161,33 @@ done
 echo ""
 echo "[Experiment B] Loss Rate Evaluation (0%, 1%, 5%, 10%)"
 for loss in 0.00 0.01 0.05 0.10; do
-    run_experiment "Exp_B_Loss_Rate" "loss_rate" "${loss}" 1024 1 "${loss}" 0 5
+    run_experiment "Exp_B_Loss_Rate" "loss_rate" "${loss}" 2048 1 "${loss}" 0 3
 done
 
 # 3. Experiment C: Network Latency (0, 50, 100 ms)
 echo ""
 echo "[Experiment C] Propagation Delay Evaluation (0ms, 50ms, 100ms)"
 for delay in 0 50 100; do
-    run_experiment "Exp_C_Delay" "delay_ms" "${delay}" 1024 1 0.00 "${delay}" 5
+    run_experiment "Exp_C_Delay" "delay_ms" "${delay}" 4096 1 0.00 "${delay}" 3
 done
 
 # 4. Experiment D: Stop-and-Wait vs Sliding Window (N=4, 8, 16)
 echo ""
 echo "[Experiment D] ARQ Protocol: Stop-and-Wait vs Sliding Window (N=4, 8, 16)"
 for win in 1 4 8 16; do
-    run_experiment "Exp_D_Window_Size" "window_size" "${win}" 1024 "${win}" 0.00 10 5
+    run_experiment "Exp_D_Window_Size" "window_size" "${win}" 2048 "${win}" 0.00 10 5
 done
 
 echo ""
 echo "=========================================================="
-echo " Generating Gnuplot Evaluation Graphs..."
+echo " Generating Evaluation Graphs..."
 echo "=========================================================="
 if command -v gnuplot &>/dev/null; then
     gnuplot scripts/plot.gp
-    echo "[SUCCESS] Graphs generated in ${RESULTS_DIR}/"
+    echo "[SUCCESS] Graphs generated with Gnuplot in ${RESULTS_DIR}/"
+elif command -v python &>/dev/null; then
+    python scripts/plot_results.py
+    echo "[SUCCESS] Graphs generated with Python in ${RESULTS_DIR}/"
 else
     echo "[WARN] Gnuplot not found. CSV results saved in ${CSV_FILE}"
 fi
