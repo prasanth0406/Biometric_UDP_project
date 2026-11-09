@@ -9,7 +9,7 @@
   #include <winsock2.h>
   #define poll WSAPoll
 #else
-  #include_next <poll.h>
+  #include <poll.h>
 #endif
 
 #endif /* BMTP_POLL_H */

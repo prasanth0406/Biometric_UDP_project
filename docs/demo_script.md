@@ -12,7 +12,7 @@
   make clean && make all
   ./bin/test_runner
   ```
-- **Show on screen**: All 29 unit tests passing with zero errors.
+- **Show on screen**: All 35 unit tests passing with zero errors.
 
 ---
 
@@ -27,21 +27,22 @@
     ```
   - Terminal 2 (Sender):
     ```bash
-    ./bin/sender -f sample_data/real_biometric/20261102_091525.jpg -p 5001 -c 4096 -w 8
+    ./bin/sender -f sample_data/real_biometric/20261102_091525.jpg -p 5001 -c 4096 -w 10
     ```
 - **Show on screen**:
-  - `[SYN]` -> 3-way handshake measurement (e.g. 0.55 ms).
-  - `[META]` -> Metadata carrying filename, size (739,837 bytes), chunk size (4096B), and full-file SHA-256 digest (`fb4b80ec...`).
-  - Streaming `[DATA]` chunks with sequence numbers and per-chunk CRC32.
+  - `[SYN]` -> Handshake measurement.
+  - `[META]` -> Metadata carrying filename, size (739,837 bytes), chunk size (4096B), Go-Back-N ARQ mode (Window size 10), and full-file SHA-256 digest (`fb4b80ec...`).
+  - Streaming `[DATA]` chunks with sequence numbers and per-chunk CRC32 within the 10-chunk sliding window.
+  - Cumulative `[ACK]` responses advancing the window.
   - `[END]` followed by receiver calculating SHA-256 and emitting `[INTEGRITY_PASS]`.
   - Machine-readable summary line with goodput, throughput, and RTT.
 
 ---
 
-### Scene 3: Fault Injection, Detection, and ARQ Retransmission (1:30 - 2:15)
-- **Visual**: Demonstrating error detection and automatic repeat request.
+### Scene 3: Fault Injection, Detection, and Go-Back-N ARQ Retransmission (1:30 - 2:15)
+- **Visual**: Demonstrating error detection and Go-Back-N automatic repeat request.
 - **Narration**:
-  > *"Although TCP guarantees stream delivery, application-layer framing protects against byte corruption or middlebox errors. Here, we inject artificial bit-flips using `-k 0.15` (15% corruption probability). Watch the receiver detect CRC32 mismatches and send NACKs, prompting immediate retransmission."*
+  > *"Although TCP guarantees stream delivery, BMTP application-layer framing protects against byte corruption or middlebox errors using Go-Back-N ARQ with sliding window size 10. Here, we inject artificial bit-flips using `-k 0.15` (15% corruption probability). Watch the receiver detect CRC32 mismatches, discard corrupted and subsequent out-of-order frames, and prompt Go-Back-N retransmission or Fast Retransmit."*
 - **Commands**:
   - Terminal 1:
     ```bash
@@ -49,12 +50,12 @@
     ```
   - Terminal 2:
     ```bash
-    ./bin/sender -f sample_data/real_biometric/20261102_091525.jpg -p 5002 -c 1024 -w 1 -k 0.15
+    ./bin/sender -f sample_data/real_biometric/20261102_091525.jpg -p 5002 -c 1024 -w 10 -k 0.15
     ```
 - **Show on screen**:
   - `[DATA_CORRUPT] Seq=X Len=1024 CRC=... -> FAULT DETECTED`
-  - `[NACK] Ack=X (CRC mismatch, request retransmission)`
-  - `[RETRANSMIT] Seq=X`
+  - `[NACK] Ack=X (CRC mismatch, request retransmission)` or duplicate ACKs.
+  - `[GBN_RETX] Window [base..next_seq-1] retransmitted` or Fast Retransmit.
   - Reconstructed file SHA-256 verification: PASS!
 
 ---

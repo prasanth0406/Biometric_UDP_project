@@ -6,7 +6,7 @@ flowchart TD
         CRC_S --> FRM_S["BMTP Frame Serializer<br/>18-byte Packed Header"]
         SHA_S --> META["META Frame Generator<br/>(Filename, Size, Hash)"]
         META --> FRM_S
-        FRM_S --> ARQ_S["ARQ Transmission Engine<br/>Stop-and-Wait / Sliding Window"]
+        FRM_S --> ARQ_S["ARQ Transmission Engine<br/>Go-Back-N Sliding Window (N=10)"]
         ARQ_S --> SOCK_S["TCP Socket<br/>(TCP_NODELAY, Non-blocking/Poll)"]
     end
 
@@ -20,7 +20,7 @@ flowchart TD
         UNPACK --> CRC_R["CRC32 Verifier"]
         CRC_R -->|CRC Valid| BUF["Chunk Reassembly Buffer<br/>Out-of-order & Duplicate Filter"]
         CRC_R -->|CRC Corrupt| NACK["NACK Generator<br/>Request Immediate Retransmit"]
-        BUF --> ACK["ACK Generator<br/>Cumulative / Selective ACK"]
+        BUF --> ACK["ACK Generator<br/>Go-Back-N Cumulative ACK"]
         BUF --> RECON["File Reconstruction Engine"]
         RECON --> DISK["Output Storage<br/>(received_files/*.jpg)"]
         DISK --> SHA_R["SHA-256 Full File Hash Verifier"]

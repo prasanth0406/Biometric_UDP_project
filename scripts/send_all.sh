@@ -17,17 +17,25 @@ if [ ! -d "${REAL_DIR}" ]; then
     exit 1
 fi
 
-# If python is available, prefer Python dataset transmission engine for high throughput and robust CSV logging
-if command -v python >/dev/null 2>&1; then
+# If python3 or python is available, prefer Python dataset transmission engine
+PYTHON_BIN=""
+if command -v python3 >/dev/null 2>&1; then
+    PYTHON_BIN="python3"
+elif command -v python >/dev/null 2>&1; then
+    PYTHON_BIN="python"
+fi
+
+if [ -n "${PYTHON_BIN}" ]; then
     PY_ARGS=()
     if [ -n "${LIMIT}" ] && [ "${LIMIT}" -gt 0 ]; then
         PY_ARGS+=("--limit" "${LIMIT}")
     fi
-    exec python scripts/transfer_dataset.py "${PY_ARGS[@]}"
+    exec "${PYTHON_BIN}" scripts/transfer_dataset.py "${PY_ARGS[@]}"
 fi
 
 # Fallback pure-bash runner
 PORT=6200
+INDEX=0
 find "${REAL_DIR}" -maxdepth 1 -type f | sort | while IFS= read -r file; do
     INDEX=$((INDEX + 1))
     if [ -n "${LIMIT}" ] && [ "${LIMIT}" -gt 0 ] && [ "${INDEX}" -gt "${LIMIT}" ]; then
@@ -43,7 +51,7 @@ find "${REAL_DIR}" -maxdepth 1 -type f | sort | while IFS= read -r file; do
     RECV_PID=$!
     sleep 0.05
 
-    ./bin/sender -f "${file}" -p "${PORT}" -c 8192 -w 16 -q 2>&1 || true
+    ./bin/sender -f "${file}" -p "${PORT}" -c 8192 -w 10 -q 2>&1 || true
     wait "${RECV_PID}" 2>/dev/null || true
 
     ORIG_HASH=$(sha256sum "${file}" | awk '{print $1}')

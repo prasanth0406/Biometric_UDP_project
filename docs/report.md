@@ -11,7 +11,7 @@ While the Transmission Control Protocol (TCP, `SOCK_STREAM`) provides a reliable
 1. **Lack of Message Boundaries**: TCP streams bytes without delineating application protocol data units (PDUs). Framing is mandatory to extract discrete chunks.
 2. **End-to-End Integrity Verification**: Under the End-to-End Argument (Saltzer et al., 1984), lower-layer transport checksums cannot guarantee that memory was uncorrupted by middleboxes or storage faults.
 
-To resolve these challenges, we designed and implemented the **Biometric Transport Protocol (BMTP)** in pure C11. BMTP implements an explicit 18-byte binary framing protocol, per-chunk IEEE 802.3 CRC32 checksums, full-file FIPS 180-2 SHA-256 cryptographic verification, ARQ (Stop-and-Wait and Sliding Window), RFC 6298 adaptive retransmission timeout (RTO), and comprehensive Wireshark-style tabular logging.
+To resolve these challenges, we designed and implemented the **Biometric Transport Protocol (BMTP)** in pure C11. BMTP implements an explicit 18-byte binary framing protocol, per-chunk IEEE 802.3 CRC32 checksums, full-file FIPS 180-2 SHA-256 cryptographic verification, **Go-Back-N ARQ Sliding Window (default size $N=10$, replacing legacy Stop-and-Wait)**, RFC 6298 adaptive retransmission timeout (RTO), and comprehensive Wireshark-style tabular logging.
 
 ---
 

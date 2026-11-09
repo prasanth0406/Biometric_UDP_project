@@ -184,6 +184,48 @@ static void test_chunking_and_reassembly(void) {
     free(orig_data);
 }
 
+static void test_go_back_n_config(void) {
+    printf("\n=== Running Go-Back-N ARQ Configuration & Framing Tests ===\n");
+
+    bmtp_meta_t gbn_meta;
+    memset(&gbn_meta, 0, sizeof(gbn_meta));
+    snprintf(gbn_meta.filename, sizeof(gbn_meta.filename), "iris_biometric.dat");
+    gbn_meta.filesize = 1048576;
+    gbn_meta.chunk_size = 1024;
+    gbn_meta.total_chunks = 1024;
+    gbn_meta.mode = 1;         /* Go-Back-N Sliding Window */
+    gbn_meta.window_size = 10; /* Size 10 Sliding Window */
+
+    uint8_t payload[BMTP_META_PAYLOAD_LEN];
+    bmtp_pack_meta(payload, &gbn_meta);
+
+    bmtp_meta_t unpacked;
+    int res = bmtp_unpack_meta(payload, BMTP_META_PAYLOAD_LEN, &unpacked);
+    TEST_ASSERT(res == 0, "Go-Back-N META payload unpacked successfully");
+    TEST_ASSERT(unpacked.mode == 1, "Go-Back-N mode flag (1) validated");
+    TEST_ASSERT(unpacked.window_size == 10, "Go-Back-N window size 10 validated");
+
+    /* Validate GBN NACK frame header */
+    bmtp_header_t nack_hdr;
+    nack_hdr.magic[0] = BMTP_MAGIC_0;
+    nack_hdr.magic[1] = BMTP_MAGIC_1;
+    nack_hdr.magic[2] = BMTP_MAGIC_2;
+    nack_hdr.magic[3] = BMTP_MAGIC_3;
+    nack_hdr.version  = BMTP_VERSION;
+    nack_hdr.msg_type = BMTP_MSG_NACK;
+    nack_hdr.seq_num  = 10;
+    nack_hdr.payload_len = 0;
+    nack_hdr.crc32    = 0;
+
+    uint8_t hdr_bytes[BMTP_HEADER_LEN];
+    bmtp_pack_header(hdr_bytes, &nack_hdr);
+
+    bmtp_header_t unpacked_nack;
+    TEST_ASSERT(bmtp_unpack_header(hdr_bytes, &unpacked_nack) == 0, "GBN NACK header unpacked successfully");
+    TEST_ASSERT(unpacked_nack.msg_type == BMTP_MSG_NACK, "GBN NACK message type confirmed");
+    TEST_ASSERT(unpacked_nack.seq_num == 10, "GBN NACK sequence number 10 confirmed");
+}
+
 int main(void) {
     printf("===================================================\n");
     printf(" BMTP TEST RUNNER (C11 POSIX Unit Tests)\n");
@@ -194,6 +236,7 @@ int main(void) {
     test_protocol_framing();
     test_meta_serialization();
     test_chunking_and_reassembly();
+    test_go_back_n_config();
 
     printf("\n===================================================\n");
     printf(" TEST RESULTS: %d/%d PASSED\n", tests_passed, tests_run);

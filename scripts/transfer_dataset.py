@@ -17,7 +17,7 @@ def main():
     parser.add_argument("--limit", type=int, default=0, help="Maximum number of files to transfer (0 for all)")
     parser.add_argument("--base-port", type=int, default=7400, help="Base TCP port")
     parser.add_argument("--chunk-size", type=int, default=8192, help="BMTP chunk size")
-    parser.add_argument("--window", type=int, default=16, help="Sliding window size")
+    parser.add_argument("--window", type=int, default=10, help="Go-Back-N sliding window size")
     parser.add_argument("--output-csv", type=str, default="results/dataset_transfer_results.csv", help="CSV output path")
     args = parser.parse_args()
 

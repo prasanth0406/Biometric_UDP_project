@@ -8,9 +8,26 @@
 
 #include <errno.h>
 #include <getopt.h>
+#include <signal.h>
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
+#include <sys/stat.h>
+
+static volatile sig_atomic_t g_running = 1;
+
+static void handle_sigint(int sig) {
+    (void)sig;
+    g_running = 0;
+}
+
+static void ensure_dir(const char *dir) {
+#ifdef _WIN32
+    mkdir(dir);
+#else
+    mkdir(dir, 0755);
+#endif
+}
 
 typedef struct {
     uint8_t *data;
@@ -24,23 +41,36 @@ int main(int argc, char *argv[]) {
     char output_dir[256] = "received_files";
     char log_dir[256] = "logs";
     int quiet = 0;
-    int single_transfer = 1;
+    int single_transfer = 0; /* Default: 0 = continuous server mode; -1 sets 1 */
 
     int opt;
-    while ((opt = getopt(argc, argv, "b:p:o:l:q1h")) != -1) {
+    while ((opt = getopt(argc, argv, "b:p:o:l:q1mh")) != -1) {
         switch (opt) {
             case 'b': snprintf(bind_ip, sizeof(bind_ip), "%s", optarg); break;
-            case 'p': port = atoi(optarg); break;
+            case 'p': {
+                int p = atoi(optarg);
+                if (p <= 0 || p > 65535) {
+                    fprintf(stderr, "Error: Invalid port '%s'. Must be between 1 and 65535.\n", optarg);
+                    return 1;
+                }
+                port = p;
+                break;
+            }
             case 'o': snprintf(output_dir, sizeof(output_dir), "%s", optarg); break;
             case 'l': snprintf(log_dir, sizeof(log_dir), "%s", optarg); break;
             case 'q': quiet = 1; break;
             case '1': single_transfer = 1; break;
+            case 'm': single_transfer = 0; break;
             case 'h':
             default:
-                fprintf(stderr, "Usage: %s [-b bind_ip] [-p port] [-o output_dir] [-l log_dir] [-q] [-1]\n", argv[0]);
+                fprintf(stderr, "Usage: %s [-b bind_ip] [-p port] [-o output_dir] [-l log_dir] [-q] [-1] [-m]\n", argv[0]);
                 return 1;
         }
     }
+
+    signal(SIGINT, handle_sigint);
+    ensure_dir(output_dir);
+    ensure_dir(log_dir);
 
     if (net_init() != 0) {
         fprintf(stderr, "Failed to initialize network subsystem.\n");
@@ -100,6 +130,9 @@ int main(int argc, char *argv[]) {
         socklen_t client_len = sizeof(client_addr);
         int client_fd = accept(listen_fd, (struct sockaddr *)&client_addr, &client_len);
         if (client_fd < 0) {
+            if (!g_running || errno == EINTR) {
+                break;
+            }
             logger_log_lifecycle(&logger, "[ERROR] accept() failed: %s", strerror(errno));
             break;
         }
@@ -121,6 +154,7 @@ int main(int argc, char *argv[]) {
         int meta_received = 0;
         chunk_entry_t *chunks = NULL;
         uint32_t chunks_stored = 0;
+        uint32_t expected_seq = 0;
         uint32_t nacks_sent = 0;
         uint32_t crc_errors = 0;
 
@@ -143,15 +177,16 @@ int main(int argc, char *argv[]) {
             if (hdr.msg_type == BMTP_MSG_META) {
                 if (bmtp_unpack_meta(payload, hdr.payload_len, &meta) == 0) {
                     meta_received = 1;
+                    expected_seq = 0;
+                    chunks_stored = 0;
                     char hex_sha[65];
                     sha256_to_hex(meta.sha256, hex_sha);
 
                     logger_log_packet(&logger, peer_str, local_str, "BMTP",
                                       BMTP_HEADER_LEN + hdr.payload_len,
-                                      "[META] File='%s' Size=%lu Chunks=%u ChunkSize=%u Mode=%s(W=%u) SHA256=%.12s...",
+                                      "[META] File='%s' Size=%lu Chunks=%u ChunkSize=%u Mode=GoBackN_SlidingWin(W=%u) SHA256=%.12s...",
                                       meta.filename, (unsigned long)meta.filesize,
                                       meta.total_chunks, meta.chunk_size,
-                                      meta.mode == 0 ? "StopAndWait" : "SlidingWin",
                                       meta.window_size, hex_sha);
 
                     chunks = (chunk_entry_t *)calloc(meta.total_chunks, sizeof(chunk_entry_t));
@@ -168,39 +203,69 @@ int main(int argc, char *argv[]) {
             } else if (hdr.msg_type == BMTP_MSG_DATA) {
                 uint32_t seq = hdr.seq_num;
                 if (!crc_valid) {
-                    crc_errors++;
-                    nacks_sent++;
-                    logger_log_packet(&logger, peer_str, local_str, "BMTP",
-                                      BMTP_HEADER_LEN + hdr.payload_len,
-                                      "[DATA_CORRUPT] Seq=%u Len=%u CRC=%08X -> FAULT DETECTED",
-                                      seq, hdr.payload_len, hdr.crc32);
+                    if (meta_received && chunks && seq >= expected_seq && seq < meta.total_chunks) {
+                        crc_errors++;
+                        nacks_sent++;
+                        logger_log_packet(&logger, peer_str, local_str, "BMTP",
+                                          BMTP_HEADER_LEN + hdr.payload_len,
+                                          "[DATA_CORRUPT] Seq=%u Len=%u CRC=%08X -> FAULT DETECTED",
+                                          seq, hdr.payload_len, hdr.crc32);
 
-                    /* Send NACK */
-                    bmtp_send_frame(client_fd, BMTP_MSG_NACK, seq, NULL, 0, 0);
-                    logger_log_packet(&logger, local_str, peer_str, "BMTP", BMTP_HEADER_LEN,
-                                      "[NACK] Ack=%u (CRC mismatch, request retransmission)", seq);
+                        /* In Go-Back-N: Send NACK for expected sequence number */
+                        bmtp_send_frame(client_fd, BMTP_MSG_NACK, expected_seq, NULL, 0, 0);
+                        logger_log_packet(&logger, local_str, peer_str, "BMTP", BMTP_HEADER_LEN,
+                                          "[NACK] Ack=%u (CRC mismatch, request GBN retransmission)", expected_seq);
+                    }
                     free(payload);
                 } else {
                     if (meta_received && chunks && seq < meta.total_chunks) {
-                        if (!chunks[seq].received) {
+                        if (seq == expected_seq) {
+                            /* In-order packet: accept and store */
                             chunks[seq].data = payload;
                             chunks[seq].len = hdr.payload_len;
                             chunks[seq].received = 1;
                             chunks_stored++;
-                        } else {
-                            /* Duplicate packet */
+                            expected_seq++;
+
+                            logger_log_packet(&logger, peer_str, local_str, "BMTP",
+                                              BMTP_HEADER_LEN + hdr.payload_len,
+                                              "[DATA] Seq=%u Len=%u CRC=%08X (%u/%u chunks in-order)",
+                                              seq, hdr.payload_len, hdr.crc32, chunks_stored, meta.total_chunks);
+
+                            /* Send cumulative ACK */
+                            bmtp_send_frame(client_fd, BMTP_MSG_ACK, seq, NULL, 0, 0);
+                            logger_log_packet(&logger, local_str, peer_str, "BMTP", BMTP_HEADER_LEN,
+                                              "[ACK] Ack=%u (GBN cumulative)", seq);
+                        } else if (seq < expected_seq) {
+                            /* Duplicate packet: already received in-order earlier */
                             free(payload);
+                            logger_log_packet(&logger, peer_str, local_str, "BMTP",
+                                              BMTP_HEADER_LEN + hdr.payload_len,
+                                              "[DATA_DUP] Seq=%u < Expected=%u -> DISCARDED", seq, expected_seq);
+
+                            /* Resend ACK for expected_seq - 1 so sender advances base */
+                            bmtp_send_frame(client_fd, BMTP_MSG_ACK, expected_seq - 1, NULL, 0, 0);
+                            logger_log_packet(&logger, local_str, peer_str, "BMTP", BMTP_HEADER_LEN,
+                                              "[ACK_DUP] Ack=%u (duplicate acknowledged)", expected_seq - 1);
+                        } else {
+                            /* Out-of-order packet (seq > expected_seq): DISCARD in Go-Back-N ARQ */
+                            free(payload);
+                            logger_log_packet(&logger, peer_str, local_str, "BMTP",
+                                              BMTP_HEADER_LEN + hdr.payload_len,
+                                              "[DATA_OUT_OF_ORDER] Seq=%u Expected=%u -> DISCARDED (GBN)",
+                                              seq, expected_seq);
+
+                            /* Send duplicate ACK for last in-order chunk, or NACK if no chunks received yet */
+                            if (expected_seq > 0) {
+                                bmtp_send_frame(client_fd, BMTP_MSG_ACK, expected_seq - 1, NULL, 0, 0);
+                                logger_log_packet(&logger, local_str, peer_str, "BMTP", BMTP_HEADER_LEN,
+                                                  "[ACK_DUP] Ack=%u (expected Seq=%u)", expected_seq - 1, expected_seq);
+                            } else {
+                                bmtp_send_frame(client_fd, BMTP_MSG_NACK, 0, NULL, 0, 0);
+                                logger_log_packet(&logger, local_str, peer_str, "BMTP", BMTP_HEADER_LEN,
+                                                  "[NACK] Ack=0 (expected Seq=0, got Seq=%u)", seq);
+                            }
                         }
-
-                        logger_log_packet(&logger, peer_str, local_str, "BMTP",
-                                          BMTP_HEADER_LEN + hdr.payload_len,
-                                          "[DATA] Seq=%u Len=%u CRC=%08X (%u/%u chunks)",
-                                          seq, hdr.payload_len, hdr.crc32, chunks_stored, meta.total_chunks);
-
-                        /* Send ACK */
-                        bmtp_send_frame(client_fd, BMTP_MSG_ACK, seq, NULL, 0, 0);
-                        logger_log_packet(&logger, local_str, peer_str, "BMTP", BMTP_HEADER_LEN,
-                                          "[ACK] Ack=%u", seq);
                     } else {
                         free(payload);
                     }
@@ -221,7 +286,10 @@ int main(int argc, char *argv[]) {
                     snprintf(out_filepath, sizeof(out_filepath), "%s/%s", output_dir, meta.filename);
 
                     FILE *fout = fopen(out_filepath, "wb");
-                    if (fout) {
+                    if (!fout) {
+                        logger_log_lifecycle(&logger, "[ERROR] Cannot open destination file '%s': %s", out_filepath, strerror(errno));
+                        bmtp_send_frame(client_fd, BMTP_MSG_ERROR, hdr.seq_num, NULL, 0, 0);
+                    } else {
                         for (uint32_t i = 0; i < meta.total_chunks; ++i) {
                             fwrite(chunks[i].data, 1, chunks[i].len, fout);
                         }
@@ -245,6 +313,9 @@ int main(int argc, char *argv[]) {
                                 logger_log_lifecycle(&logger, "[INTEGRITY_FAIL] Hash mismatch! Expected=%s Actual=%s", expected_hex, actual_hex);
                                 bmtp_send_frame(client_fd, BMTP_MSG_ERROR, hdr.seq_num, NULL, 0, 0);
                             }
+                        } else {
+                            logger_log_lifecycle(&logger, "[ERROR] Failed to compute SHA-256 on '%s'", out_filepath);
+                            bmtp_send_frame(client_fd, BMTP_MSG_ERROR, hdr.seq_num, NULL, 0, 0);
                         }
                     }
                 } else {
@@ -271,7 +342,7 @@ int main(int argc, char *argv[]) {
         CLOSE_SOCKET(client_fd);
         logger_log_lifecycle(&logger, "[FIN] Client session terminated");
 
-    } while (!single_transfer);
+    } while (g_running && !single_transfer);
 
     CLOSE_SOCKET(listen_fd);
     logger_log_lifecycle(&logger, "[SHUTDOWN] Server stopped");

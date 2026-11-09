@@ -21,8 +21,8 @@ A university-level Computer Networks assignment implementing reliable, high-perf
   - Explicit network byte order serialization avoiding struct padding anomalies.
   - Distinct PDU types: `META`, `DATA`, `ACK`, `NACK`, `END`, `ERROR`.
 - **ARQ Transmission Modes**:
-  - **Stop-and-Wait ($W=1$)**: Per-chunk ACK with RFC 6298 Adaptive Retransmission Timeout (RTO).
-  - **Sliding Window ($W=4, 8, 16$)**: Pipelined frame transmission with cumulative/selective ACKs.
+  - **Go-Back-N ARQ Sliding Window ($W=10$)**: Pipelined frame transmission with cumulative ACKs and Go-Back-N timeout / fast retransmit recovery (replacing legacy Stop-and-Wait).
+  - **Configurable Window Size**: Supports custom window sizes ($N=1, 4, 8, 10, 16$) via `-w <win>`.
 - **Network Impairment Testing**:
   - Standalone C multiplexed lossy proxy (`src/proxy.c`) supporting packet loss, artificial delay, and fault injection.
   - Linux `tc netem` impairment scripts (`scripts/netem_setup.sh`, `scripts/netem_teardown.sh`).
@@ -128,18 +128,18 @@ Options:
 
 ### 4.2 Running the Sender (Client) with Real Biometric Data
 ```bash
-# Normal Stop-and-Wait transfer with 1024-byte chunks
-./bin/sender -f sample_data/real_biometric/20261102_091525.jpg -h 127.0.0.1 -p 5001 -c 1024 -w 1
+# Default Go-Back-N ARQ transfer (Window size N=10, 1024-byte chunks)
+./bin/sender -f sample_data/real_biometric/20261102_091525.jpg -h 127.0.0.1 -p 5001 -c 1024
 
-# Pipelined Sliding Window transfer (Window size N=8, chunk size 4096)
-./bin/sender -f sample_data/real_biometric/20261102_091525.jpg -h 127.0.0.1 -p 5001 -c 4096 -w 8
+# Pipelined Go-Back-N transfer with explicit window and chunk size (Window N=10, chunk 4096)
+./bin/sender -f sample_data/real_biometric/20261102_091525.jpg -h 127.0.0.1 -p 5001 -c 4096 -w 10
 ```
 Options:
 - `-f <file>`: Path to real biometric data file.
 - `-h <host>`: Receiver IP address (default: `127.0.0.1`).
 - `-p <port>`: Receiver port (default: `5001`).
 - `-c <chunk>`: Chunk size in bytes (default: `1024`; evaluated `512`, `1024`, `4096`, `8192`).
-- `-w <win>`: ARQ Window size $N$ (default: `1` for Stop-and-Wait; `4`, `8`, `16` for Sliding Window).
+- `-w <win>`: Go-Back-N ARQ Window size $N$ (default: `10`; evaluated `1`, `4`, `8`, `10`, `16`).
 - `-t <ms>`: ACK timeout in milliseconds (default: `500`; dynamically adapted via RFC 6298 RTO).
 - `-r <retries>`: Maximum retransmission attempts per chunk (default: `5`).
 - `-k <prob>`: Fault injection probability ($0.0 \le prob \le 1.0$) for payload bit-flips.
@@ -159,8 +159,8 @@ bash scripts/send_all.sh 5
 # In terminal 1:
 ./bin/receiver -p 5001 -o received_files -1
 
-# In terminal 2 (inject 15% corruption probability):
-./bin/sender -f sample_data/real_biometric/20261102_091525.jpg -p 5001 -c 1024 -w 1 -k 0.15
+# In terminal 2 (inject 15% corruption probability with Go-Back-N Window=10):
+./bin/sender -f sample_data/real_biometric/20261102_091525.jpg -p 5001 -c 1024 -w 10 -k 0.15
 ```
 Watch the receiver detect CRC32 errors, send `[NACK]`, and the sender immediately retransmit the uncorrupted chunk until SHA-256 verification succeeds!
 
@@ -172,8 +172,8 @@ Watch the receiver detect CRC32 errors, send `[NACK]`, and the sender immediatel
 # 2. Start Lossy Proxy on port 5000 targeting port 5001 (5% drop rate, 20ms delay):
 ./bin/proxy -l 5000 -p 5001 -m 0.05 -t 20 -1 &
 
-# 3. Start Sender connecting through proxy port 5000:
-./bin/sender -f sample_data/real_biometric/20261102_091525.jpg -p 5000 -c 1024 -w 1 -t 1200
+# 3. Start Sender connecting through proxy port 5000 (Go-Back-N Window=10):
+./bin/sender -f sample_data/real_biometric/20261102_091525.jpg -p 5000 -c 1024 -w 10 -t 1200
 ```
 
 ---
@@ -215,7 +215,7 @@ This script executes repeated runs for each configuration, recording results in 
 1. **`results/exp_chunk_size.png`**: Goodput (KB/s) and Header Overhead (%) vs. Chunk Size (512, 1024, 4096, 8192 bytes).
 2. **`results/exp_loss_rate.png`**: Retransmission Count and Goodput Degradation vs. Network Loss Rate (0%, 1%, 5%, 10%).
 3. **`results/exp_delay.png`**: Total Transfer Time (s) and Application RTT (ms) vs. One-Way Injected Latency (0, 50, 100 ms).
-4. **`results/exp_window_size.png`**: Throughput and Transmission Time: Stop-and-Wait ($N=1$) vs. Sliding Window ($N=4, 8, 16$).
+4. **`results/exp_window_size.png`**: Throughput and Transmission Time: Go-Back-N Sliding Window Scaling ($N=1, 4, 8, 10, 16$).
 
 ---
 

@@ -150,31 +150,31 @@ echo "=========================================================="
 echo " BMTP AUTOMATED BENCHMARK SUITE (Repetitions per config)"
 echo "=========================================================="
 
-# 1. Experiment A: Chunk Size (512, 1024, 4096, 8192)
+# 1. Experiment A: Chunk Size (512, 1024, 4096, 8192) with Go-Back-N (N=10)
 echo ""
-echo "[Experiment A] Chunk Size Evaluation (512, 1024, 4096, 8192)"
+echo "[Experiment A] Chunk Size Evaluation (512, 1024, 4096, 8192) [Go-Back-N W=10]"
 for csz in 512 1024 4096 8192; do
-    run_experiment "Exp_A_Chunk_Size" "chunk_size" "${csz}" "${csz}" 1 0.0 0 5
+    run_experiment "Exp_A_Chunk_Size" "chunk_size" "${csz}" "${csz}" 10 0.0 0 5
 done
 
-# 2. Experiment B: Network Loss Rate (0%, 1%, 5%, 10%)
+# 2. Experiment B: Network Loss Rate (0%, 1%, 5%, 10%) with Go-Back-N (N=10)
 echo ""
-echo "[Experiment B] Loss Rate Evaluation (0%, 1%, 5%, 10%)"
+echo "[Experiment B] Loss Rate Evaluation (0%, 1%, 5%, 10%) [Go-Back-N W=10]"
 for loss in 0.00 0.01 0.05 0.10; do
-    run_experiment "Exp_B_Loss_Rate" "loss_rate" "${loss}" 2048 1 "${loss}" 0 3
+    run_experiment "Exp_B_Loss_Rate" "loss_rate" "${loss}" 2048 10 "${loss}" 0 3
 done
 
-# 3. Experiment C: Network Latency (0, 50, 100 ms)
+# 3. Experiment C: Network Latency (0, 50, 100 ms) with Go-Back-N (N=10)
 echo ""
-echo "[Experiment C] Propagation Delay Evaluation (0ms, 50ms, 100ms)"
+echo "[Experiment C] Propagation Delay Evaluation (0ms, 50ms, 100ms) [Go-Back-N W=10]"
 for delay in 0 50 100; do
-    run_experiment "Exp_C_Delay" "delay_ms" "${delay}" 4096 1 0.00 "${delay}" 3
+    run_experiment "Exp_C_Delay" "delay_ms" "${delay}" 4096 10 0.00 "${delay}" 3
 done
 
-# 4. Experiment D: Stop-and-Wait vs Sliding Window (N=4, 8, 16)
+# 4. Experiment D: Go-Back-N Sliding Window Scaling (N=1, 4, 8, 10, 16)
 echo ""
-echo "[Experiment D] ARQ Protocol: Stop-and-Wait vs Sliding Window (N=4, 8, 16)"
-for win in 1 4 8 16; do
+echo "[Experiment D] ARQ Protocol: Go-Back-N Sliding Window Scaling (N=1, 4, 8, 10, 16)"
+for win in 1 4 8 10 16; do
     run_experiment "Exp_D_Window_Size" "window_size" "${win}" 2048 "${win}" 0.00 10 5
 done
 
@@ -185,6 +185,9 @@ echo "=========================================================="
 if command -v gnuplot &>/dev/null; then
     gnuplot scripts/plot.gp
     echo "[SUCCESS] Graphs generated with Gnuplot in ${RESULTS_DIR}/"
+elif command -v python3 &>/dev/null; then
+    python3 scripts/plot_results.py
+    echo "[SUCCESS] Graphs generated with Python in ${RESULTS_DIR}/"
 elif command -v python &>/dev/null; then
     python scripts/plot_results.py
     echo "[SUCCESS] Graphs generated with Python in ${RESULTS_DIR}/"

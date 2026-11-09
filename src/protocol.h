@@ -42,8 +42,8 @@ typedef struct {
     uint32_t chunk_size;
     uint32_t total_chunks;
     uint8_t sha256[32];
-    uint32_t mode;        /* 0: stop-and-wait, 1: sliding-window */
-    uint32_t window_size; /* Window N */
+    uint32_t mode;        /* 0: stop-and-wait (legacy), 1: go-back-n sliding-window */
+    uint32_t window_size; /* Window N (default: 10) */
 } bmtp_meta_t;
 
 #define BMTP_META_PAYLOAD_LEN (BMTP_MAX_FILENAME + 8 + 4 + 4 + 32 + 4 + 4)

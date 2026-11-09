@@ -53,8 +53,8 @@ if [ "${USE_TCPDUMP}" -eq 1 ]; then
     RECV_PID=$!
     sleep 0.2
 
-    echo "[CAPTURE] Starting Sender with real biometric file..."
-    ./bin/sender -f "${SAMPLE_FILE}" -p "${PORT}" -c 4096 -w 8 -k 0.10 -q
+    echo "[CAPTURE] Starting Sender with real biometric file (Go-Back-N Window=10)..."
+    ./bin/sender -f "${SAMPLE_FILE}" -p "${PORT}" -c 4096 -w 10 -k 0.10 -q
     wait "${RECV_PID}"
 
     sleep 0.5
@@ -71,8 +71,8 @@ else
     RECV_PID=$!
     sleep 0.2
 
-    echo "[CAPTURE] Starting Sender through recorder (port ${PROXY_PORT}) with 10% fault injection..."
-    ./bin/sender -f "${SAMPLE_FILE}" -p "${PROXY_PORT}" -c 4096 -w 8 -k 0.10 -q
+    echo "[CAPTURE] Starting Sender through recorder (port ${PROXY_PORT}) with Go-Back-N Window=10 and 10% fault injection..."
+    ./bin/sender -f "${SAMPLE_FILE}" -p "${PROXY_PORT}" -c 4096 -w 10 -k 0.10 -q
     wait "${RECV_PID}"
     wait "${RECORDER_PID}" 2>/dev/null || true
 fi

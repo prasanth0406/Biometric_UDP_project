@@ -12,6 +12,7 @@
   #define CLOSE_SOCKET(s) closesocket(s)
 #else
   #include <arpa/inet.h>
+  #include <netdb.h>
   #include <netinet/in.h>
   #include <netinet/tcp.h>
   #include <sys/socket.h>

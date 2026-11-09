@@ -18,11 +18,11 @@
 
 [CmdletBinding()]
 param(
-    [Parameter(Position = 0, Mandatory = $true, HelpMessage = "IP address of host machine (sender)")]
-    [string]$HostIP,
+    [Parameter(Position = 0, Mandatory = $false)]
+    [string]$HostIP = "127.0.0.1",
 
-    [Parameter(Position = 1, Mandatory = $true, HelpMessage = "IP address of receiver machine")]
-    [string]$ReceiverIP,
+    [Parameter(Position = 1, Mandatory = $false)]
+    [string]$ReceiverIP = "127.0.0.1",
 
     [Parameter(Position = 2)]
     [int]$Port = 5001,
@@ -31,7 +31,7 @@ param(
     [int]$Limit = 0,
 
     [int]$ChunkSize = 8192,
-    [int]$WindowSize = 16,
+    [int]$WindowSize = 10,
     [string]$ImageDir = "sample_data\real_biometric",
     [string]$RecvDir = "received_files",
     [string]$LogDir = "logs",
@@ -113,19 +113,8 @@ Waiting for incoming image transfers from $HostIP... (Press Ctrl+C to stop)
     Write-Host $Header -ForegroundColor Green
     $Header | Out-File -FilePath $RecvLogFile -Encoding utf8
 
-    $RecvCount = 0
-    while ($true) {
-        $recvOut = (& $BinReceiver -b 0.0.0.0 -p $Port -o $RecvDir -1 2>&1 | Out-String)
-        if ($recvOut -and $recvOut.Trim().Length -gt 0) {
-            $RecvCount++
-            Write-Host "`n--------------------------------------------------------------------------------" -ForegroundColor Cyan
-            Write-Host "[$((Get-Date).ToString('HH:mm:ss'))] Image #$RecvCount Received" -ForegroundColor Cyan
-            Write-Host "--------------------------------------------------------------------------------" -ForegroundColor Cyan
-            Write-Host $recvOut
-            $recvOut | Out-File -FilePath $RecvLogFile -Append -Encoding utf8
-        }
-        Start-Sleep -Milliseconds 50
-    }
+    # Run receiver daemon in continuous mode
+    & $BinReceiver -b 0.0.0.0 -p $Port -o $RecvDir -l $LogDir
     exit 0
 }
 
@@ -168,7 +157,7 @@ $Banner = @"
  Total Images Found  : $TotalFound
  Images to Transfer  : $TotalToSend
  Protocol / Framing  : BMTP (Big-Endian 18-byte Header, CRC32 chunk + SHA-256 full file)
- ARQ Mode            : Sliding-Window (Window N=$WindowSize, Chunk Size=$ChunkSize B)
+ ARQ Mode            : Go-Back-N Sliding-Window (Window N=$WindowSize, Chunk Size=$ChunkSize B)
  Detailed Log File   : $LogFile
  CSV Summary File    : $CsvFile
  Execution Start     : $(Get-Date)

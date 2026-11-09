@@ -8,7 +8,7 @@
 
 #include <errno.h>
 #include <getopt.h>
-#include <poll.h>
+#include "bmtp_poll.h"
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
@@ -43,7 +43,7 @@ int main(int argc, char *argv[]) {
     char host[64] = "127.0.0.1";
     int port = 5001;
     uint32_t chunk_size = 1024;
-    uint32_t window_size = 1; /* 1 = stop-and-wait */
+    uint32_t window_size = 10; /* Go-Back-N ARQ default window size 10 */
     int timeout_ms = 500;
     int max_retries = 5;
     float corrupt_prob = 0.0f;
@@ -56,7 +56,15 @@ int main(int argc, char *argv[]) {
         switch (opt) {
             case 'f': snprintf(file_path, sizeof(file_path), "%s", optarg); break;
             case 'h': snprintf(host, sizeof(host), "%s", optarg); break;
-            case 'p': port = atoi(optarg); break;
+            case 'p': {
+                int p = atoi(optarg);
+                if (p <= 0 || p > 65535) {
+                    fprintf(stderr, "Error: Invalid port '%s'. Must be between 1 and 65535.\n", optarg);
+                    return 1;
+                }
+                port = p;
+                break;
+            }
             case 'c': chunk_size = (uint32_t)atoi(optarg); break;
             case 'w': window_size = (uint32_t)atoi(optarg); break;
             case 't': timeout_ms = atoi(optarg); break;
@@ -66,7 +74,7 @@ int main(int argc, char *argv[]) {
             case 'l': snprintf(log_dir, sizeof(log_dir), "%s", optarg); break;
             case 'q': quiet = 1; break;
             default:
-                fprintf(stderr, "Usage: %s -f <file> [-h host] [-p port] [-c chunk_size] [-w window] [-k corrupt_prob] [-d drop_seq] [-q]\n", argv[0]);
+                fprintf(stderr, "Usage: %s -f <file> [-h host] [-p port] [-c chunk_size] [-w window (default: 10)] [-k corrupt_prob] [-d drop_seq] [-q]\n", argv[0]);
                 return 1;
         }
     }
@@ -145,10 +153,24 @@ int main(int argc, char *argv[]) {
     serv_addr.sin_family = AF_INET;
     serv_addr.sin_port = htons((uint16_t)port);
     if (inet_pton(AF_INET, host, &serv_addr.sin_addr) <= 0) {
-        logger_log_lifecycle(&logger, "[FATAL] Invalid IP address: %s", host);
-        CLOSE_SOCKET(sockfd);
-        logger_close(&logger);
-        return 1;
+        /* Fall back to getaddrinfo for hostnames */
+        struct addrinfo hints, *res = NULL;
+        memset(&hints, 0, sizeof(hints));
+        hints.ai_family = AF_INET;
+        hints.ai_socktype = SOCK_STREAM;
+
+        char port_str[16];
+        snprintf(port_str, sizeof(port_str), "%d", port);
+
+        if (getaddrinfo(host, port_str, &hints, &res) != 0 || !res) {
+            logger_log_lifecycle(&logger, "[FATAL] Cannot resolve hostname or IP: %s", host);
+            CLOSE_SOCKET(sockfd);
+            logger_close(&logger);
+            return 1;
+        }
+        struct sockaddr_in *ipv4 = (struct sockaddr_in *)res->ai_addr;
+        serv_addr.sin_addr = ipv4->sin_addr;
+        freeaddrinfo(res);
     }
 
     /* Measure TCP 3-way Handshake Latency */
@@ -189,7 +211,7 @@ int main(int argc, char *argv[]) {
     meta.chunk_size = chunk_size;
     meta.total_chunks = total_chunks;
     memcpy(meta.sha256, file_sha, 32);
-    meta.mode = (window_size > 1) ? 1 : 0;
+    meta.mode = 1; /* Go-Back-N Sliding Window */
     meta.window_size = window_size;
 
     uint8_t meta_payload[BMTP_META_PAYLOAD_LEN];
@@ -208,9 +230,9 @@ int main(int argc, char *argv[]) {
     total_wire_bytes += BMTP_HEADER_LEN + BMTP_META_PAYLOAD_LEN;
 
     logger_log_packet(&logger, local_str, peer_str, "BMTP", BMTP_HEADER_LEN + BMTP_META_PAYLOAD_LEN,
-                      "[META] File='%s' Size=%lu Chunks=%u ChunkSize=%u Mode=%s(W=%u) SHA256=%.12s...",
+                      "[META] File='%s' Size=%lu Chunks=%u ChunkSize=%u Mode=GoBackN_SlidingWin(W=%u) SHA256=%.12s...",
                       base_filename, (unsigned long)total_size, total_chunks, chunk_size,
-                      window_size > 1 ? "SlidingWin" : "StopAndWait", window_size, hex_sha);
+                      window_size, hex_sha);
 
     /* Wait for META ACK */
     bmtp_header_t ack_hdr;
@@ -240,206 +262,201 @@ int main(int argc, char *argv[]) {
 
     srand((unsigned int)time(NULL));
 
-    /* Step 2: Data Transfer Loop */
-    if (window_size <= 1) {
-        /* Stop-and-Wait Mode */
-        for (uint32_t seq = 0; seq < total_chunks; ++seq) {
-            int delivered = 0;
+    /* Step 2: Data Transfer Loop (Go-Back-N ARQ Sliding Window, default W=10) */
+    uint32_t base = 0;
+    uint32_t next_seq = 0;
+    double timer_start = 0.0;
+    int timer_running = 0;
+    uint32_t dup_ack_count = 0;
+    uint32_t fast_rx_base = (uint32_t)-1;
 
-            while (!delivered && chunks[seq].attempts <= max_retries) {
-                chunks[seq].attempts++;
-                int corrupt_this = 0;
-                int drop_this = 0;
+    while (base < total_chunks) {
+        /* 1. Transmit all chunks within sliding window [base .. base + window_size - 1] */
+        while (next_seq < base + window_size && next_seq < total_chunks) {
+            if (chunks[next_seq].attempts == 0) {
+                chunks[next_seq].attempts = 1;
+            }
+            chunks[next_seq].send_time = get_monotonic_time();
+            if (!timer_running) {
+                timer_start = chunks[next_seq].send_time;
+                timer_running = 1;
+            }
 
-                if (corrupt_prob > 0.0f && ((float)rand() / (float)RAND_MAX) < corrupt_prob) {
-                    corrupt_this = 1;
-                }
-                if (drop_seq == (int)seq && chunks[seq].attempts == 1) {
-                    drop_this = 1;
-                }
+            int corrupt_this = 0;
+            int drop_this = 0;
 
-                if (chunks[seq].attempts > 1) {
-                    retransmissions++;
+            if (corrupt_prob > 0.0f && ((float)rand() / (float)RAND_MAX) < corrupt_prob) {
+                corrupt_this = 1;
+            }
+            if (drop_seq == (int)next_seq && chunks[next_seq].attempts == 1) {
+                drop_this = 1;
+            }
+
+            if (!drop_this) {
+                bmtp_send_frame(sockfd, BMTP_MSG_DATA, next_seq, chunks[next_seq].data, chunks[next_seq].len, corrupt_this);
+                total_wire_bytes += BMTP_HEADER_LEN + chunks[next_seq].len;
+
+                if (chunks[next_seq].attempts > 1) {
                     logger_log_packet(&logger, local_str, peer_str, "BMTP",
-                                      BMTP_HEADER_LEN + chunks[seq].len,
-                                      "[RETRANSMIT] Seq=%u (attempt %d/%d, RTO=%.0fms)",
-                                      seq, chunks[seq].attempts, max_retries + 1, current_rto * 1000.0);
-                }
-
-                chunks[seq].send_time = get_monotonic_time();
-                if (!drop_this) {
-                    bmtp_send_frame(sockfd, BMTP_MSG_DATA, seq, chunks[seq].data, chunks[seq].len, corrupt_this);
-                    total_wire_bytes += BMTP_HEADER_LEN + chunks[seq].len;
-
-                    logger_log_packet(&logger, local_str, peer_str, "BMTP",
-                                      BMTP_HEADER_LEN + chunks[seq].len,
-                                      "[DATA] Seq=%u Len=%u CRC=%08X%s",
-                                      seq, chunks[seq].len, chunks[seq].crc32,
-                                      corrupt_this ? " [FAULT_CORRUPT_INJECTED]" : "");
+                                      BMTP_HEADER_LEN + chunks[next_seq].len,
+                                      "[RETRANSMIT_GBN] Seq=%u (attempt %d, Window=[%u..%u]) Len=%u CRC=%08X%s",
+                                      next_seq, chunks[next_seq].attempts, base,
+                                      (base + window_size - 1 < total_chunks ? base + window_size - 1 : total_chunks - 1),
+                                      chunks[next_seq].len, chunks[next_seq].crc32,
+                                      corrupt_this ? " [CORRUPT_INJECTED]" : "");
                 } else {
-                    logger_log_lifecycle(&logger, "[FAULT_DROP] Dropped initial send of Seq=%u to force timeout", seq);
+                    logger_log_packet(&logger, local_str, peer_str, "BMTP",
+                                      BMTP_HEADER_LEN + chunks[next_seq].len,
+                                      "[DATA] Seq=%u Window=[%u..%u] Len=%u CRC=%08X%s",
+                                      next_seq, base,
+                                      (base + window_size - 1 < total_chunks ? base + window_size - 1 : total_chunks - 1),
+                                      chunks[next_seq].len, chunks[next_seq].crc32,
+                                      corrupt_this ? " [CORRUPT_INJECTED]" : "");
                 }
+            } else {
+                logger_log_lifecycle(&logger, "[FAULT_DROP] Dropped initial send of Seq=%u to force GBN timeout", next_seq);
+            }
+            next_seq++;
+        }
 
-                /* Poll for ACK with Adaptive RTO */
-                struct pollfd pfd;
-                pfd.fd = sockfd;
-                pfd.events = POLLIN;
-                pfd.revents = 0;
+        /* 2. Poll for incoming ACKs / NACKs */
+        int poll_timeout_ms = (next_seq < base + window_size && next_seq < total_chunks) ? 0 : 5;
+        struct pollfd pfd;
+        pfd.fd = sockfd;
+        pfd.events = POLLIN;
+        pfd.revents = 0;
 
-                int ptimeout = (int)(current_rto * 1000.0);
-                if (ptimeout < 50) ptimeout = 50;
-                int pret = poll(&pfd, 1, ptimeout);
-
-                if (pret > 0 && (pfd.revents & POLLIN)) {
-                    bmtp_header_t resp_hdr;
-                    int r_crc = 1;
-                    if (bmtp_recv_frame(sockfd, &resp_hdr, NULL, &r_crc) == 0) {
-                        double chunk_rtt = (get_monotonic_time() - chunks[seq].send_time) * 1000.0;
-                        if (resp_hdr.msg_type == BMTP_MSG_ACK && resp_hdr.seq_num == seq) {
-                            delivered = 1;
-                            chunks[seq].acked = 1;
-                            total_rtt_sum += chunk_rtt;
+        int pret = poll(&pfd, 1, poll_timeout_ms);
+        int fast_retransmit = 0;
+        while (pret > 0 && (pfd.revents & POLLIN)) {
+            bmtp_header_t resp_hdr;
+            int r_crc = 1;
+            if (bmtp_recv_frame(sockfd, &resp_hdr, NULL, &r_crc) == 0) {
+                double now = get_monotonic_time();
+                if (resp_hdr.msg_type == BMTP_MSG_ACK) {
+                    uint32_t ack_seq = resp_hdr.seq_num;
+                    if (ack_seq < total_chunks) {
+                        if (ack_seq >= base) {
+                            /* Cumulative ACK: all chunks from base up to ack_seq are acknowledged */
+                            for (uint32_t s = base; s <= ack_seq; ++s) {
+                                chunks[s].acked = 1;
+                            }
+                            double rtt = (now - chunks[ack_seq].send_time) * 1000.0;
+                            total_rtt_sum += rtt;
                             rtt_samples_count++;
 
-                            /* RFC 6298 update */
-                            double sample_s = chunk_rtt / 1000.0;
-                            rttvar = (1.0 - 0.25) * rttvar + 0.25 * (srtt > sample_s ? srtt - sample_s : sample_s - srtt);
-                            srtt = (1.0 - 0.125) * srtt + 0.125 * sample_s;
+                            /* RFC 6298 Adaptive RTO update */
+                            double sample_s = rtt / 1000.0;
+                            rttvar = 0.75 * rttvar + 0.25 * (srtt > sample_s ? srtt - sample_s : sample_s - srtt);
+                            srtt = 0.875 * srtt + 0.125 * sample_s;
                             current_rto = srtt + 4.0 * rttvar;
                             if (current_rto < min_rto) current_rto = min_rto;
                             if (current_rto > 5.0) current_rto = 5.0;
 
+                            base = ack_seq + 1;
+                            dup_ack_count = 0;
+                            fast_retransmit = 0;
+                            fast_rx_base = (uint32_t)-1;
+
                             logger_log_packet(&logger, peer_str, local_str, "BMTP", BMTP_HEADER_LEN,
-                                              "[ACK] Ack=%u (RTT=%.2f ms, AdaptiveRTO=%.0f ms)",
-                                              seq, chunk_rtt, current_rto * 1000.0);
-                        } else if (resp_hdr.msg_type == BMTP_MSG_NACK && resp_hdr.seq_num == seq) {
+                                              "[ACK] Ack=%u Base=%u (RTT=%.2f ms, AdaptiveRTO=%.0f ms)",
+                                              ack_seq, base, rtt, current_rto * 1000.0);
+
+                            if (base == next_seq) {
+                                timer_running = 0;
+                            } else {
+                                timer_start = now;
+                                timer_running = 1;
+                            }
+                        } else if (ack_seq + 1 == base) {
+                            /* Duplicate ACK for base - 1 */
+                            dup_ack_count++;
                             logger_log_packet(&logger, peer_str, local_str, "BMTP", BMTP_HEADER_LEN,
-                                              "[NACK] Ack=%u (CRC Error reported by Receiver -> Fast Retransmit)", seq);
+                                              "[ACK_DUP] Ack=%u Count=%u (Base=%u)", ack_seq, dup_ack_count, base);
+                            if (dup_ack_count == 3 && fast_rx_base != base) {
+                                fast_retransmit = 1;
+                            }
                         }
                     }
-                } else {
-                    /* Timeout expired */
-                    current_rto *= 1.5; /* Exponential backoff */
-                    if (current_rto > 3.0) current_rto = 3.0;
-                    logger_log_lifecycle(&logger, "[TIMEOUT] Seq=%u timed out (new RTO=%.0f ms)", seq, current_rto * 1000.0);
+                } else if (resp_hdr.msg_type == BMTP_MSG_NACK) {
+                    uint32_t nack_seq = resp_hdr.seq_num;
+                    logger_log_packet(&logger, peer_str, local_str, "BMTP", BMTP_HEADER_LEN,
+                                      "[NACK] Ack=%u (Fault detected at receiver)", nack_seq);
+                    if (nack_seq > base && nack_seq < total_chunks) {
+                        for (uint32_t s = base; s < nack_seq; ++s) {
+                            chunks[s].acked = 1;
+                        }
+                        base = nack_seq;
+                        fast_rx_base = (uint32_t)-1;
+                    }
+                    if (nack_seq == base && fast_rx_base != base) {
+                        fast_retransmit = 1;
+                    }
                 }
-            }
-
-            if (!delivered) {
-                logger_log_lifecycle(&logger, "[FATAL] Max retransmissions exceeded on Seq=%u", seq);
+            } else {
+                /* Connection closed or error */
+                logger_log_lifecycle(&logger, "[ERROR] Connection lost while awaiting ACKs");
                 CLOSE_SOCKET(sockfd);
                 logger_close(&logger);
                 return 1;
             }
 
-            if (!quiet && (seq % 4 == 0 || seq == total_chunks - 1)) {
-                double elapsed = get_monotonic_time() - transfer_start;
-                double cur_kbps = (elapsed > 0) ? ((double)((seq + 1) * chunk_size) / 1024.0 / elapsed) : 0;
-                print_progress(seq + 1, total_chunks, cur_kbps);
-            }
-        }
-    } else {
-        /* Sliding Window Mode (Window Size N) */
-        uint32_t base = 0;
-        uint32_t next_seq = 0;
-
-        while (base < total_chunks) {
-            /* 1. Send all packets within window */
-            while (next_seq < base + window_size && next_seq < total_chunks) {
-                chunks[next_seq].attempts++;
-                chunks[next_seq].send_time = get_monotonic_time();
-
-                int corrupt_this = 0;
-                if (corrupt_prob > 0.0f && ((float)rand() / (float)RAND_MAX) < corrupt_prob) {
-                    corrupt_this = 1;
-                }
-
-                bmtp_send_frame(sockfd, BMTP_MSG_DATA, next_seq, chunks[next_seq].data, chunks[next_seq].len, corrupt_this);
-                total_wire_bytes += BMTP_HEADER_LEN + chunks[next_seq].len;
-
-                logger_log_packet(&logger, local_str, peer_str, "BMTP",
-                                  BMTP_HEADER_LEN + chunks[next_seq].len,
-                                  "[DATA] Seq=%u Window=[%u..%u] Len=%u CRC=%08X%s",
-                                  next_seq, base, (base + window_size - 1 < total_chunks ? base + window_size - 1 : total_chunks - 1),
-                                  chunks[next_seq].len, chunks[next_seq].crc32,
-                                  corrupt_this ? " [CORRUPT_INJECTED]" : "");
-                next_seq++;
-            }
-
-            /* 2. Poll for incoming ACKs */
-            struct pollfd pfd;
             pfd.fd = sockfd;
             pfd.events = POLLIN;
             pfd.revents = 0;
+            pret = poll(&pfd, 1, 0);
+        }
 
-            int pret = poll(&pfd, 1, 20); /* 20 ms poll tick */
-            if (pret > 0 && (pfd.revents & POLLIN)) {
-                bmtp_header_t resp_hdr;
-                int r_crc = 1;
-                if (bmtp_recv_frame(sockfd, &resp_hdr, NULL, &r_crc) == 0) {
-                    double now = get_monotonic_time();
-                    if (resp_hdr.msg_type == BMTP_MSG_ACK) {
-                        uint32_t ack_seq = resp_hdr.seq_num;
-                        if (ack_seq < total_chunks) {
-                            chunks[ack_seq].acked = 1;
-                            double rtt = (now - chunks[ack_seq].send_time) * 1000.0;
-                            total_rtt_sum += rtt;
-                            rtt_samples_count++;
-
-                            logger_log_packet(&logger, peer_str, local_str, "BMTP", BMTP_HEADER_LEN,
-                                              "[ACK] Ack=%u (RTT=%.2f ms)", ack_seq, rtt);
-
-                            /* Advance sliding window base */
-                            while (base < total_chunks && chunks[base].acked) {
-                                base++;
-                            }
-                        }
-                    } else if (resp_hdr.msg_type == BMTP_MSG_NACK) {
-                        uint32_t nack_seq = resp_hdr.seq_num;
-                        if (nack_seq < total_chunks && !chunks[nack_seq].acked) {
-                            retransmissions++;
-                            chunks[nack_seq].attempts++;
-                            chunks[nack_seq].send_time = now;
-
-                            logger_log_packet(&logger, local_str, peer_str, "BMTP",
-                                              BMTP_HEADER_LEN + chunks[nack_seq].len,
-                                              "[RETRANSMIT_NACK] Seq=%u", nack_seq);
-
-                            bmtp_send_frame(sockfd, BMTP_MSG_DATA, nack_seq, chunks[nack_seq].data, chunks[nack_seq].len, 0);
-                            total_wire_bytes += BMTP_HEADER_LEN + chunks[nack_seq].len;
-                        }
-                    }
-                }
+        /* After draining socket ACKs, execute Fast Retransmit if needed */
+        if (fast_retransmit && base < total_chunks && fast_rx_base != base) {
+            fast_rx_base = base;
+            chunks[base].attempts++;
+            if (chunks[base].attempts > max_retries + 1) {
+                logger_log_lifecycle(&logger, "[FATAL] Max retransmissions exceeded on Seq=%u", base);
+                CLOSE_SOCKET(sockfd);
+                logger_close(&logger);
+                return 1;
             }
+            retransmissions++;
+            logger_log_lifecycle(&logger, "[FAST_RETRANSMIT_GBN] Resending from Base=%u (Window=[%u..%u], attempt %d)",
+                                 base, base,
+                                 (base + window_size - 1 < total_chunks ? base + window_size - 1 : total_chunks - 1),
+                                 chunks[base].attempts);
+            next_seq = base;
+            timer_start = get_monotonic_time();
+            timer_running = 1;
+            dup_ack_count = 0;
+            continue;
+        }
 
-            /* 3. Check for timeout on unACKed in-flight chunks */
-            double now = get_monotonic_time();
-            for (uint32_t s = base; s < next_seq; ++s) {
-                if (!chunks[s].acked && (now - chunks[s].send_time) > (timeout_ms / 1000.0)) {
-                    if (chunks[s].attempts > max_retries) {
-                        logger_log_lifecycle(&logger, "[FATAL] Max retransmissions exceeded on Seq=%u", s);
-                        CLOSE_SOCKET(sockfd);
-                        logger_close(&logger);
-                        return 1;
-                    }
-                    retransmissions++;
-                    chunks[s].attempts++;
-                    chunks[s].send_time = now;
-
-                    logger_log_packet(&logger, local_str, peer_str, "BMTP",
-                                      BMTP_HEADER_LEN + chunks[s].len,
-                                      "[RETRANSMIT_TIMEOUT] Seq=%u (attempt %d)", s, chunks[s].attempts);
-
-                    bmtp_send_frame(sockfd, BMTP_MSG_DATA, s, chunks[s].data, chunks[s].len, 0);
-                    total_wire_bytes += BMTP_HEADER_LEN + chunks[s].len;
-                }
+        /* 3. Check for timeout on oldest unacknowledged chunk (base) */
+        double now = get_monotonic_time();
+        if (timer_running && (now - timer_start) > current_rto) {
+            fast_rx_base = (uint32_t)-1;
+            chunks[base].attempts++;
+            if (chunks[base].attempts > max_retries + 1) {
+                logger_log_lifecycle(&logger, "[FATAL] Max retransmissions exceeded on Seq=%u", base);
+                CLOSE_SOCKET(sockfd);
+                logger_close(&logger);
+                return 1;
             }
+            retransmissions++;
+            current_rto *= 1.5;
+            if (current_rto > 3.0) current_rto = 3.0;
 
-            if (!quiet && (base % 4 == 0 || base == total_chunks)) {
-                double elapsed = get_monotonic_time() - transfer_start;
-                double cur_kbps = (elapsed > 0) ? ((double)(base * chunk_size) / 1024.0 / elapsed) : 0;
-                print_progress(base, total_chunks, cur_kbps);
-            }
+            logger_log_lifecycle(&logger, "[TIMEOUT_GBN] Seq=%u timed out -> Go Back to Base=%u (resending window, new RTO=%.0f ms, attempt %d)",
+                                 base, base, current_rto * 1000.0, chunks[base].attempts);
+
+            next_seq = base; /* Go Back to Base */
+            timer_start = now;
+            timer_running = 1;
+            dup_ack_count = 0;
+        }
+
+        if (!quiet && (base % 4 == 0 || base == total_chunks)) {
+            double elapsed = get_monotonic_time() - transfer_start;
+            double cur_kbps = (elapsed > 0) ? ((double)(base * chunk_size) / 1024.0 / elapsed) : 0;
+            print_progress(base, total_chunks, cur_kbps);
         }
     }
 
@@ -502,7 +519,7 @@ int main(int argc, char *argv[]) {
         printf(" Transfer Status:         %s\n", transfer_pass ? "SUCCESS (PASS)" : "FAILED");
         printf(" Biometric File:          %s (%lu bytes)\n", base_filename, (unsigned long)total_size);
         printf(" Total Chunks:            %u (Chunk size: %u bytes)\n", total_chunks, chunk_size);
-        printf(" ARQ Mode:                %s (Window N=%u)\n", window_size > 1 ? "Sliding-Window" : "Stop-and-Wait", window_size);
+        printf(" ARQ Mode:                Go-Back-N ARQ (Window N=%u)\n", window_size);
         printf(" Total Duration:          %.4f seconds\n", total_duration);
         printf(" TCP Handshake Latency:   %.3f ms\n", handshake_ms);
         printf(" Average Application RTT: %.3f ms\n", avg_rtt);

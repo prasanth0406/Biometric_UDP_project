@@ -60,10 +60,10 @@ unset multiplot
 
 # 4. Window Size Evaluation Plot
 set output 'results/exp_window_size.png'
-set multiplot layout 1,2 title "Experiment D: Stop-and-Wait vs. Sliding Window (N=4, 8, 16)" font 'sans-bold,12'
+set multiplot layout 1,2 title "Experiment D: Go-Back-N Sliding Window Scaling" font 'sans-bold,12'
 
 set title "Goodput Scaling across Window Size"
-set xlabel "Window Size N (N=1 is Stop-and-Wait)"
+set xlabel "Go-Back-N Window Size N (Default N=10)"
 set ylabel "Goodput (KB/s)"
 set key bottom right
 plot '< grep "Exp_D_Window_Size" results/results.csv' using 3:6:7 with yerrorlines title "Goodput (KB/s)" lw 2 pt 7 ps 1.2 lc rgb "#17becf"

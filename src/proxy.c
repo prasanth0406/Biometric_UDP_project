@@ -5,7 +5,7 @@
 
 #include <errno.h>
 #include <getopt.h>
-#include <poll.h>
+#include "bmtp_poll.h"
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
@@ -33,9 +33,25 @@ int main(int argc, char *argv[]) {
     int opt;
     while ((opt = getopt(argc, argv, "l:d:p:m:k:t:s:1?")) != -1) {
         switch (opt) {
-            case 'l': listen_port = atoi(optarg); break;
+            case 'l': {
+                int p = atoi(optarg);
+                if (p <= 0 || p > 65535) {
+                    fprintf(stderr, "Error: Invalid listen port '%s'. Must be 1-65535.\n", optarg);
+                    return 1;
+                }
+                listen_port = p;
+                break;
+            }
             case 'd': snprintf(target_host, sizeof(target_host), "%s", optarg); break;
-            case 'p': target_port = atoi(optarg); break;
+            case 'p': {
+                int p = atoi(optarg);
+                if (p <= 0 || p > 65535) {
+                    fprintf(stderr, "Error: Invalid target port '%s'. Must be 1-65535.\n", optarg);
+                    return 1;
+                }
+                target_port = p;
+                break;
+            }
             case 'm': drop_rate = (float)atof(optarg); break;
             case 'k': corrupt_rate = (float)atof(optarg); break;
             case 't': delay_ms = atoi(optarg); break;

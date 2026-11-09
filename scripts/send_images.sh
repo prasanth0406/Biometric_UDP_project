@@ -28,59 +28,115 @@ cd "${ROOT_DIR}"
 print_usage() {
     cat << 'EOF'
 Usage:
+  # Cross-host Sender Mode (transfers images to receiver machine):
   ./scripts/send_images.sh <HOST_IP> <RECEIVER_IP> [PORT] [LIMIT]
 
+  # Cross-host Receiver Mode (listens on receiver machine for incoming transfers):
+  ./scripts/send_images.sh --listen [PORT]
+  ./scripts/send_images.sh <HOST_IP> <RECEIVER_IP> [PORT] --listen
+
+  # Localhost Self-Test (runs receiver in background and sender locally):
+  ./scripts/send_images.sh 127.0.0.1 127.0.0.1 [PORT] [LIMIT]
+
 Arguments:
-  HOST_IP      : IP address of the host machine (sender) e.g. 192.168.1.10
+  HOST_IP      : IP address of the sender machine e.g. 192.168.1.10
   RECEIVER_IP  : IP address of the receiver machine e.g. 192.168.1.20 (or 127.0.0.1)
   PORT         : (Optional) TCP port (default: 5001)
   LIMIT        : (Optional) Number of images to transfer (default: 0 = all images)
 
 Options / Modes:
-  --listen, --receiver : Start in receiver mode on the receiver host
-  --help, -h           : Show this help message
+  --listen, --receiver, -l : Start in continuous receiver mode on the receiver host
+  --help, -h               : Show this help message
 
 Examples:
-  # Cross-host transfer (Host 192.168.1.10 sending all images to Receiver 192.168.1.20)
+  # 1. On Receiver Host (e.g. 192.168.1.20):
+  ./scripts/send_images.sh --listen
+
+  # 2. On Sender Host (e.g. 192.168.1.10):
   ./scripts/send_images.sh 192.168.1.10 192.168.1.20
 
-  # Cross-host receiver mode (run on 192.168.1.20 to listen for incoming images)
-  ./scripts/send_images.sh 192.168.1.10 192.168.1.20 --listen
-
-  # Localhost test (runs both receiver and sender locally for 5 images)
+  # 3. Localhost test (5 images on port 5001):
   ./scripts/send_images.sh 127.0.0.1 127.0.0.1 5001 5
 EOF
 }
 
-if [ $# -lt 2 ]; then
-    print_usage
-    exit 1
-fi
+# Parse options and flags
+RUN_AS_RECEIVER=0
+POSITIONAL=()
 
-if [ "$1" = "-h" ] || [ "$1" = "--help" ]; then
-    print_usage
-    exit 0
-fi
+for arg in "$@"; do
+    case "${arg}" in
+        -h|--help)
+            print_usage
+            exit 0
+            ;;
+        --listen|--receiver|-l)
+            RUN_AS_RECEIVER=1
+            ;;
+        *)
+            POSITIONAL+=("${arg}")
+            ;;
+    esac
+done
 
-HOST_IP="$1"
-RECEIVER_IP="$2"
-PORT="${3:-5001}"
-LIMIT="${4:-0}"
+HOST_IP=""
+RECEIVER_IP=""
+PORT=5001
+LIMIT=0
 CHUNK_SIZE=8192
-WINDOW_SIZE=16
+WINDOW_SIZE=10
 IMAGE_DIR="sample_data/real_biometric"
 RECV_DIR="received_files"
 LOG_DIR="logs"
 RESULTS_DIR="results"
 
-# Mode override check
-RUN_AS_RECEIVER=0
-for arg in "$@"; do
-    if [ "$arg" = "--listen" ] || [ "$arg" = "--receiver" ]; then
-        RUN_AS_RECEIVER=1
-        break
+if [ "${RUN_AS_RECEIVER}" -eq 1 ]; then
+    if [ ${#POSITIONAL[@]} -eq 0 ]; then
+        HOST_IP="0.0.0.0"
+        RECEIVER_IP="0.0.0.0"
+        PORT=5001
+    elif [ ${#POSITIONAL[@]} -eq 1 ]; then
+        if [[ "${POSITIONAL[0]}" =~ ^[0-9]+$ ]]; then
+            PORT="${POSITIONAL[0]}"
+            HOST_IP="0.0.0.0"
+            RECEIVER_IP="0.0.0.0"
+        else
+            RECEIVER_IP="${POSITIONAL[0]}"
+            HOST_IP="0.0.0.0"
+            PORT=5001
+        fi
+    elif [ ${#POSITIONAL[@]} -eq 2 ]; then
+        if [[ "${POSITIONAL[1]}" =~ ^[0-9]+$ ]]; then
+            RECEIVER_IP="${POSITIONAL[0]}"
+            PORT="${POSITIONAL[1]}"
+            HOST_IP="0.0.0.0"
+        else
+            HOST_IP="${POSITIONAL[0]}"
+            RECEIVER_IP="${POSITIONAL[1]}"
+            PORT=5001
+        fi
+    else
+        HOST_IP="${POSITIONAL[0]}"
+        RECEIVER_IP="${POSITIONAL[1]}"
+        PORT="${POSITIONAL[2]:-5001}"
+        LIMIT="${POSITIONAL[3]:-0}"
     fi
-done
+else
+    if [ ${#POSITIONAL[@]} -lt 2 ]; then
+        print_usage
+        exit 1
+    fi
+    HOST_IP="${POSITIONAL[0]}"
+    RECEIVER_IP="${POSITIONAL[1]}"
+    PORT="${POSITIONAL[2]:-5001}"
+    LIMIT="${POSITIONAL[3]:-0}"
+fi
+
+# Validate PORT is numeric and in valid range
+if ! [[ "${PORT}" =~ ^[0-9]+$ ]] || [ "${PORT}" -le 0 ] || [ "${PORT}" -gt 65535 ]; then
+    echo "[ERROR] Invalid port '${PORT}'. Port must be an integer between 1 and 65535."
+    exit 1
+fi
 
 # Ensure directories exist
 mkdir -p "${RECV_DIR}" "${LOG_DIR}" "${RESULTS_DIR}"
@@ -135,42 +191,21 @@ TIMESTAMP=$(date +"%Y%m%d_%H%M%S")
 # RECEIVER MODE (Runs on the receiver host to accept incoming images)
 # ==============================================================================
 if [ "${RUN_AS_RECEIVER}" -eq 1 ]; then
-    RECV_LOG_FILE="${LOG_DIR}/receiver_session_${TIMESTAMP}.log"
     echo "================================================================================"
     echo " BMTP RECEIVER DAEMON - LISTENING FOR BIOMETRIC IMAGES"
     echo "================================================================================"
-    echo " Expected Host (Sender) : ${HOST_IP}"
-    echo " Receiver Listen IP     : ${RECEIVER_IP} (0.0.0.0)"
+    [ -n "${HOST_IP}" ] && [ "${HOST_IP}" != "0.0.0.0" ] && echo " Expected Sender Host   : ${HOST_IP}"
+    echo " Receiver Listen IP     : 0.0.0.0 (All Interfaces)"
     echo " Listen Port            : ${PORT}"
     echo " Destination Directory  : ${RECV_DIR}"
-    echo " Receiver Log File      : ${RECV_LOG_FILE}"
+    echo " Log Directory          : ${LOG_DIR}"
     echo " Started At             : $(date)"
     echo "================================================================================"
-    echo "Waiting for incoming image transfers from ${HOST_IP}... (Press Ctrl+C to stop)"
+    echo "Waiting for incoming image transfers on port ${PORT}... (Press Ctrl+C to stop)"
     echo ""
 
-    FILE_COUNT=0
-    while true; do
-        TMP_RECV_LOG="${LOG_DIR}/tmp_recv_${TIMESTAMP}.log"
-        # Run receiver for a single file transfer
-        "${BIN_RECEIVER}" -b 0.0.0.0 -p "${PORT}" -o "${RECV_DIR}" -1 > "${TMP_RECV_LOG}" 2>&1 || true
-
-        # Read temporary log using input redirection and display to console & append to session log
-        if [ -s "${TMP_RECV_LOG}" ]; then
-            FILE_COUNT=$((FILE_COUNT + 1))
-            echo "--------------------------------------------------------------------------------"
-            echo "[$(date +'%T')] Image #${FILE_COUNT} Received"
-            echo "--------------------------------------------------------------------------------"
-            # Console detailed log
-            cat < "${TMP_RECV_LOG}"
-            # Write to session log file using input redirection
-            cat < "${TMP_RECV_LOG}" >> "${RECV_LOG_FILE}"
-            echo "" >> "${RECV_LOG_FILE}"
-            rm -f "${TMP_RECV_LOG}"
-        fi
-        sleep 0.05
-    done
-    exit 0
+    # Run receiver daemon in continuous mode (accepting multiple transfers seamlessly)
+    exec "${BIN_RECEIVER}" -b 0.0.0.0 -p "${PORT}" -o "${RECV_DIR}" -l "${LOG_DIR}"
 fi
 
 # ==============================================================================
@@ -214,7 +249,7 @@ cat << EOF | tee "${LOG_FILE}"
  Total Images Found  : ${TOTAL_FOUND}
  Images to Transfer  : ${TOTAL_TO_SEND}
  Protocol / Framing  : BMTP (Big-Endian 18-byte Header, CRC32 chunk + SHA-256 full file)
- ARQ Mode            : Sliding-Window (Window N=${WINDOW_SIZE}, Chunk Size=${CHUNK_SIZE} B)
+ ARQ Mode            : Go-Back-N Sliding-Window (Window N=${WINDOW_SIZE}, Chunk Size=${CHUNK_SIZE} B)
  Detailed Log File   : ${LOG_FILE}
  CSV Summary File    : ${CSV_FILE}
  Execution Start     : $(date)
@@ -281,8 +316,8 @@ EOF
     TMP_SENDER_LOG="${LOG_DIR}/tmp_sender_${TIMESTAMP}_${INDEX}.log"
     SENDER_STATUS=0
 
-    # Retry loop (up to 3 attempts in case receiver is cycling sockets)
-    MAX_RETRIES=3
+    # Retry loop (up to 5 attempts in case of network latency)
+    MAX_RETRIES=5
     ATTEMPT=1
     while [ "${ATTEMPT}" -le "${MAX_RETRIES}" ]; do
         if "${BIN_SENDER}" -f "${image_path}" -h "${RECEIVER_IP}" -p "${PORT}" -c "${CHUNK_SIZE}" -w "${WINDOW_SIZE}" > "${TMP_SENDER_LOG}" 2>&1; then
@@ -290,8 +325,8 @@ EOF
             break
         else
             SENDER_STATUS=$?
-            echo "   [RETRY ${ATTEMPT}/${MAX_RETRIES}] Connection to ${RECEIVER_IP}:${PORT} failed (exit ${SENDER_STATUS}). Waiting 0.2s..." | tee -a "${LOG_FILE}"
-            sleep 0.2
+            echo "   [RETRY ${ATTEMPT}/${MAX_RETRIES}] Connection to ${RECEIVER_IP}:${PORT} failed (exit ${SENDER_STATUS}). Waiting 0.5s..." | tee -a "${LOG_FILE}"
+            sleep 0.5
             ATTEMPT=$((ATTEMPT + 1))
         fi
     done
