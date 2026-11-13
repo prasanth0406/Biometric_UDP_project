@@ -1,6 +1,6 @@
 # Sensitive biometric captures (real biometric folder)
-sample_data/real_biometric/
-*.raw
+git *.raw
+sample_data/
 *.dat.secret
 *.fingerprint
 *.iris
